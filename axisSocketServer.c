@@ -16,6 +16,19 @@
 
 #define APP_NAME "axisSocketServer"
 
+void encryptFrame(unsigned char rowData[], size_t size, const char *keyword) 
+{
+	syslog(LOG_INFO, "Encrypting with keyword %s", keyword);
+	int i = 0;
+	int keywordLength = strlen(keyword);
+	for(i = 0; i < size; ++i) 
+	{
+		char keywordChar = keyword[i % keywordLength];
+		rowData[i] = rowData[i] ^ keywordChar;
+	}
+}
+
+
 void sendImageFromStream(media_stream *stream, int connfd)
 {
 	media_frame *frame;
@@ -46,6 +59,10 @@ void sendImageFromStream(media_stream *stream, int connfd)
 			rowData[row] = ((unsigned char *) data)[row];
 		
 	}
+//	encrypt the rowData
+	char *keyword = "sinyata lavina pak leti napred!";
+	encryptFrame(rowData, size, keyword);
+
 	write(connfd, rowData, sizeof(rowData));
 }
 

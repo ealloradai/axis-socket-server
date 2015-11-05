@@ -1,4 +1,7 @@
 *.eap
 *.old
 *~
-*.config*
+*.conf*
+.target-makefrag
+*.o
+axisSocketServer
