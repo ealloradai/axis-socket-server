@@ -10,11 +10,16 @@
 #include <sys/types.h>
 #include <time.h> 
 #include <syslog.h>
-
 #include <sys/time.h>
 #include <capture.h>
-
+#include <glib.h>
+#include <gio/gio.h>
 #define APP_NAME "axisSocketServer"
+
+struct ImageThreadParam {
+   media_stream *stream;
+   int connfd;
+}; 
 
 void encryptFrame(unsigned char rowData[], size_t size, const char *keyword) 
 {
@@ -29,9 +34,13 @@ void encryptFrame(unsigned char rowData[], size_t size, const char *keyword)
 }
 
 
-void sendImageFromStream(media_stream *stream, int connfd)
+void sendImageFromStream(void *paramPtr)
 {
-	media_frame *frame;
+	
+	struct ImageThreadParam *param = (struct ImageThreadParam *) paramPtr;
+	media_stream *stream = param->stream;
+	int connfd = param->connfd; 	
+	media_frame *frame ;
 	void *data;
 
 	frame = capture_get_frame(stream);
@@ -148,11 +157,25 @@ int main(int argc, char *argv[])
 		int i = 0;
 		for(i = 0; i < numberOfImages; ++i)
 		{
-			sendImageFromStream(stream, connfd);
+			struct ImageThreadParam param;
+			param.stream = stream;
+			param.connfd = connfd;
+			//every time open new thread - synchronization
+			GThread * threadResult;
+			threadResult = g_thread_new( "lala", sendImageFromStream, &param);
+			if(!threadResult) 
+			{
+				syslog(LOG_INFO, "Error creating thread");
+				exit(EXIT_FAILURE);
+			} 
+			syslog(LOG_INFO, "thread started");
+			g_thread_join(threadResult);
+			//sendImageFromStream(param);
 			sleep(timeout);
 		}
 
 		syslog(LOG_INFO, "Image sent");
 		close(connfd);
+		exit(EXIT_SUCCESS);
 	}
 }
