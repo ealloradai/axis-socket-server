@@ -20,9 +20,12 @@ struct ImageThreadParam {
    media_stream *stream;
    int connfd;
    char* encKey;
-   int maxDelay;
+   uint32_t maxDelay;
+   uint32_t encrypt;
+   int imageNumber;
 }; 
 
+GMutex *mutex;
 char * generateRandomString(int length) 
 {
 	const char *alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRTSUVWXYZ0123456789";
@@ -61,7 +64,10 @@ void sendImageFromStream(void *paramPtr)
 	media_stream *stream = param->stream;
 	int connfd = param->connfd; 
 	char *keyword = param->encKey;	
-	int maxDelay = param->maxDelay;
+	uint32_t maxDelay = param->maxDelay;
+	uint32_t encrypt = param->encrypt;
+	int imageNumber = param -> imageNumber;
+	
 	media_frame *frame ;
 	void *data;
 
@@ -75,20 +81,9 @@ void sendImageFromStream(void *paramPtr)
 	int randDelay = rand()%maxDelay;
 	syslog(LOG_INFO, "RANDOM DELAY IS %d", randDelay);
 	sleep(randDelay);
+
 	
-
-	int total_size = size;
-	syslog(LOG_INFO, "Total size %d", total_size);
-	total_size = htonl(total_size);
-/*
-	First write the total size of the image in bytes.
-	htonl stands for "host to network long".
-	It turns the numbers the endian-ness of the numbers from the host format to the network format
-	*/
-	write(connfd, &total_size, sizeof(total_size));
-	syslog(LOG_INFO, "Total size after write() = %d", total_size);
-
-//	Then send the data of the image
+//	Get the image bytes into rowData
 	int row = 0;
 	unsigned char rowData[size];
 	for (row = 0; row < size; row++)
@@ -96,11 +91,35 @@ void sendImageFromStream(void *paramPtr)
 			rowData[row] = ((unsigned char *) data)[row];
 		
 	}
-//	encrypt the rowData
-	//char *keyword = "sinyata lavina pak leti napred!";
-	encryptFrame(rowData, size, keyword);
-
+//	encrypt the rowData if necessary
+	if(encrypt != NULL && encrypt != 0) {
+		encryptFrame(rowData, size, keyword);		
+	}
+	
+	
+	//lock the mutex for thread safety
+	g_mutex_lock(mutex);
+	
+	/*
+	 * First we send the image number
+	 */
+	syslog(LOG_INFO, "Image number %d", imageNumber);
+	imageNumber = htonl(imageNumber);
+	write(connfd, &imageNumber, sizeof(imageNumber));
+	
+/*
+	Then write the total size of the image in bytes.
+	htonl stands for "host to network long".
+	It turns the numbers the endian-ness of the numbers from the host format to the network format
+	*/
+	int total_size = size;
+	syslog(LOG_INFO, "Total size %d", total_size);
+	total_size = htonl(total_size);
+	write(connfd, &total_size, sizeof(total_size));
 	write(connfd, rowData, sizeof(rowData));
+	
+//	unlock the mutex
+	g_mutex_unlock(mutex);
 }
 
 
@@ -135,6 +154,8 @@ int main(int argc, char *argv[])
 {
 	time_t t;
 	srand((unsigned) time(&t));
+	
+	g_mutex_init(mutex);
 
 	openlog(APP_NAME, LOG_PID, LOG_LOCAL4);
 	int listenfd = 0, connfd = 0;
@@ -165,15 +186,21 @@ int main(int argc, char *argv[])
  */
 		connfd = accept(listenfd, (struct sockaddr*) NULL, NULL);
 		syslog(LOG_INFO, "Client accepted");
-		// generate key and send it to the client
-		char* encKey = generateRandomString(25);
-		int keyLen = strlen(encKey);
-		syslog(LOG_INFO, "keylen %d", keyLen);
-		syslog(LOG_INFO, "key %s", encKey);
-		keyLen = htonl(keyLen);
-		write(connfd, &keyLen, sizeof(int));
-		write(connfd, encKey, strlen(encKey)*sizeof(char));
-		syslog(LOG_INFO, "Encryption key sent");
+		
+		uint32_t encrypt = readInt(connfd);
+		char* encKey = NULL;
+		if(encrypt != NULL && encrypt != 0) 
+		{
+			// generate key and send it to the client
+			encKey = generateRandomString(25);
+			int keyLen = strlen(encKey);
+			syslog(LOG_INFO, "keylen %d", keyLen);
+			syslog(LOG_INFO, "key %s", encKey);
+			keyLen = htonl(keyLen);
+			write(connfd, &keyLen, sizeof(int));
+			write(connfd, encKey, strlen(encKey)*sizeof(char));
+			syslog(LOG_INFO, "Encryption key sent");			
+		}
 
 		/*
 		Read the four parameters: timeout, width, height and number of images
@@ -205,6 +232,9 @@ int main(int argc, char *argv[])
 			param.connfd = connfd;
 			param.encKey = encKey;
 			param.maxDelay = maxDelay;
+			param.encrypt = encrypt;
+			param.imageNumber = i;
+			
 			//every time open new thread - synchronization
 			GThread * threadResult;
 			threadResult = g_thread_new( "lala", sendImageFromStream, &param);
@@ -219,8 +249,10 @@ int main(int argc, char *argv[])
 			sleep(timeout);
 		}
 		//release the memory for malloc in random string generator
-		free(encKey);
-		syslog(LOG_INFO, "Image sent");
+		if(encKey) {
+			free(encKey);
+		}
+		syslog(LOG_INFO, "Images sent. Closing.");
 		close(connfd);
 		exit(EXIT_SUCCESS);
 	}
