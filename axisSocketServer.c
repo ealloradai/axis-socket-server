@@ -10,22 +10,15 @@
 #include <sys/types.h>
 #include <time.h> 
 #include <syslog.h>
+
 #include <sys/time.h>
 #include <capture.h>
+
 #include <glib.h>
 #include <gio/gio.h>
+
 #define APP_NAME "axisSocketServer"
 
-struct ImageThreadParam {
-   media_stream *stream;
-   int connfd;
-   char* encKey;
-   uint32_t maxDelay;
-   uint32_t encrypt;
-   int imageNumber;
-}; 
-
-GMutex *mutex;
 char * generateRandomString(int length) 
 {
 	const char *alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRTSUVWXYZ0123456789";
@@ -40,7 +33,6 @@ char * generateRandomString(int length)
 		stringbuffer[i] = ch;
 	}
 	stringbuffer[length] = '\0';
-	syslog(LOG_INFO, "KEY %s", stringbuffer);
 	return stringbuffer;	
 }
 
@@ -56,19 +48,9 @@ void encryptFrame(unsigned char rowData[], size_t size, const char *keyword)
 	}
 }
 
-
-void sendImageFromStream(void *paramPtr)
+void sendImageFromStream(media_stream *stream, int connfd, char* encKey, uint32_t maxDelay, int imageNumber)
 {
-	
-	struct ImageThreadParam *param = (struct ImageThreadParam *) paramPtr;
-	media_stream *stream = param->stream;
-	int connfd = param->connfd; 
-	char *keyword = param->encKey;	
-	uint32_t maxDelay = param->maxDelay;
-	uint32_t encrypt = param->encrypt;
-	int imageNumber = param -> imageNumber;
-	
-	media_frame *frame ;
+	media_frame *frame;
 	void *data;
 
 	frame = capture_get_frame(stream);
@@ -77,49 +59,33 @@ void sendImageFromStream(void *paramPtr)
 	size_t size = capture_frame_size(frame); 
 	syslog(LOG_INFO, "Image captured");
 	
-	//random delay
-	int randDelay = rand()%maxDelay;
-	syslog(LOG_INFO, "RANDOM DELAY IS %d", randDelay);
-	sleep(randDelay);
+	int total_size = size;
+	syslog(LOG_INFO, "Total size %d", total_size);
+	total_size = htonl(total_size);
 
-	
-//	Get the image bytes into rowData
+//	Then send the data of the image
 	int row = 0;
 	unsigned char rowData[size];
 	for (row = 0; row < size; row++)
 	{
 			rowData[row] = ((unsigned char *) data)[row];
-		
-	}
-//	encrypt the rowData if necessary
-	if(encrypt != NULL && encrypt != 0) {
-		encryptFrame(rowData, size, keyword);		
 	}
 	
+	if(encKey) {
+		encryptFrame(rowData, size, encKey);
+	}
 	
-	//lock the mutex for thread safety
-	g_mutex_lock(mutex);
+	int randDelay = rand()%maxDelay;
+	syslog(LOG_INFO, "Sleeping with random delay %d", randDelay);
+	sleep(randDelay);
 	
-	/*
-	 * First we send the image number
-	 */
-	syslog(LOG_INFO, "Image number %d", imageNumber);
 	imageNumber = htonl(imageNumber);
-	write(connfd, &imageNumber, sizeof(imageNumber));
 	
-/*
-	Then write the total size of the image in bytes.
-	htonl stands for "host to network long".
-	It turns the numbers the endian-ness of the numbers from the host format to the network format
-	*/
-	int total_size = size;
-	syslog(LOG_INFO, "Total size %d", total_size);
-	total_size = htonl(total_size);
+//	g_mutex_lock(mutex);
+	write(connfd, &imageNumber, sizeof(imageNumber));
 	write(connfd, &total_size, sizeof(total_size));
 	write(connfd, rowData, sizeof(rowData));
-	
-//	unlock the mutex
-	g_mutex_unlock(mutex);
+//	g_mutex_unlock(mutex);
 }
 
 
@@ -152,15 +118,10 @@ uint32_t readInt(int connfd)
 
 int main(int argc, char *argv[])
 {
-	time_t t;
-	srand((unsigned) time(&t));
-	
-	g_mutex_init(mutex);
-
 	openlog(APP_NAME, LOG_PID, LOG_LOCAL4);
 	int listenfd = 0, connfd = 0;
 	struct sockaddr_in serv_addr;
-	
+
 	char sendBuff[1025];
 
 //	Create the socket
@@ -186,22 +147,20 @@ int main(int argc, char *argv[])
  */
 		connfd = accept(listenfd, (struct sockaddr*) NULL, NULL);
 		syslog(LOG_INFO, "Client accepted");
-		
+
 		uint32_t encrypt = readInt(connfd);
+		
 		char* encKey = NULL;
 		if(encrypt != NULL && encrypt != 0) 
 		{
 			// generate key and send it to the client
 			encKey = generateRandomString(25);
 			int keyLen = strlen(encKey);
-			syslog(LOG_INFO, "keylen %d", keyLen);
-			syslog(LOG_INFO, "key %s", encKey);
 			keyLen = htonl(keyLen);
 			write(connfd, &keyLen, sizeof(int));
 			write(connfd, encKey, strlen(encKey)*sizeof(char));
-			syslog(LOG_INFO, "Encryption key sent");			
 		}
-
+		
 		/*
 		Read the four parameters: timeout, width, height and number of images
 		Check readInt()
@@ -211,49 +170,47 @@ int main(int argc, char *argv[])
 		uint32_t height = readInt(connfd);
 		uint32_t numberOfImages = readInt(connfd);
 		uint32_t maxDelay = readInt(connfd);
-
-		syslog(LOG_INFO, "Fixed parameters received: %d, %d, %d, %d", timeout, width, height, numberOfImages);		
+		
+		syslog(LOG_INFO, "Fixed parameters received: %d, %d, %d, %d %d", timeout, width, height, numberOfImages, maxDelay);		
 		char streamParamsBuffer[100];
 
 //		Build the stream parameters with the given width and height
 		sprintf(streamParamsBuffer, "resolution=%dx%d&fps=15",  width, height);
 		syslog(LOG_INFO, "%s", streamParamsBuffer);
-
-
 		media_stream *stream;
 //		Open the stream
 		stream = capture_open_stream(IMAGE_JPEG, streamParamsBuffer);
 		syslog(LOG_INFO, "Open stream captured 1");
-		int i = 0;
-		for(i = 0; i < numberOfImages; ++i)
+		pid_t childPID;
+		childPID = fork();
+		if(childPID >= 0) 
 		{
-			struct ImageThreadParam param;
-			param.stream = stream;
-			param.connfd = connfd;
-			param.encKey = encKey;
-			param.maxDelay = maxDelay;
-			param.encrypt = encrypt;
-			param.imageNumber = i;
-			
-			//every time open new thread - synchronization
-			GThread * threadResult;
-			threadResult = g_thread_new( "lala", sendImageFromStream, &param);
-			if(!threadResult) 
+			syslog(LOG_INFO, "forked");
+			if(childPID == 0) 
 			{
-				syslog(LOG_INFO, "Error creating thread");
-				exit(EXIT_FAILURE);
-			} 
-			syslog(LOG_INFO, "thread started");
-			g_thread_join(threadResult);
-			//sendImageFromStream(param);
-			sleep(timeout);
-		}
-		//release the memory for malloc in random string generator
-		if(encKey) {
-			free(encKey);
-		}
-		syslog(LOG_INFO, "Images sent. Closing.");
-		close(connfd);
-		exit(EXIT_SUCCESS);
+//				GMutex *mutex;
+//				g_mutex_init(mutex);
+				int i = 0;
+				for(i = 0; i < numberOfImages; ++i)
+				{
+					int imagePid = fork();
+					if(imagePid == 0) 
+					{
+						sendImageFromStream(stream, connfd, encKey, maxDelay, i);
+					} 
+					else 
+					{
+						sleep(timeout);
+					}
+				}
+
+				syslog(LOG_INFO, "Images sent");
+				close(connfd);
+			}
+		} 
+		else 
+		{
+			syslog(LOG_INFO, "Fork failed");
+		} 
 	}
 }
