@@ -119,6 +119,8 @@ uint32_t readInt(int connfd)
 int main(int argc, char *argv[])
 {
 	openlog(APP_NAME, LOG_PID, LOG_LOCAL4);
+
+	srand ( time(NULL) );
 	int listenfd = 0, connfd = 0;
 	struct sockaddr_in serv_addr;
 
@@ -148,6 +150,15 @@ int main(int argc, char *argv[])
 		connfd = accept(listenfd, (struct sockaddr*) NULL, NULL);
 		syslog(LOG_INFO, "Client accepted");
 
+		
+		/*
+		Read the four parameters: timeout, width, height and number of images
+		Check readInt()
+		*/
+		uint32_t timeout = readInt(connfd);
+		uint32_t width = readInt(connfd);
+		uint32_t height = readInt(connfd);
+		uint32_t maxDelay = readInt(connfd);
 		uint32_t encrypt = readInt(connfd);
 		
 		char* encKey = NULL;
@@ -161,17 +172,7 @@ int main(int argc, char *argv[])
 			write(connfd, encKey, strlen(encKey)*sizeof(char));
 		}
 		
-		/*
-		Read the four parameters: timeout, width, height and number of images
-		Check readInt()
-		*/
-		uint32_t timeout = readInt(connfd);
-		uint32_t width = readInt(connfd);
-		uint32_t height = readInt(connfd);
-		uint32_t numberOfImages = readInt(connfd);
-		uint32_t maxDelay = readInt(connfd);
-		
-		syslog(LOG_INFO, "Fixed parameters received: %d, %d, %d, %d %d", timeout, width, height, numberOfImages, maxDelay);		
+		syslog(LOG_INFO, "Fixed parameters received: %d, %d, %d, %d", timeout, width, height, maxDelay);		
 		char streamParamsBuffer[100];
 
 //		Build the stream parameters with the given width and height
@@ -185,18 +186,21 @@ int main(int argc, char *argv[])
 		childPID = fork();
 		if(childPID >= 0) 
 		{
+			srand(time(NULL) ^ (getpid()<<16));
 			syslog(LOG_INFO, "forked");
 			if(childPID == 0) 
 			{
 //				GMutex *mutex;
 //				g_mutex_init(mutex);
 				int i = 0;
-				for(i = 0; i < numberOfImages; ++i)
+				while(1)
 				{
 					int imagePid = fork();
+					srand(time(NULL) ^ (getpid()<<16));
 					if(imagePid == 0) 
 					{
 						sendImageFromStream(stream, connfd, encKey, maxDelay, i);
+						exit(0);
 					} 
 					else 
 					{
