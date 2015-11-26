@@ -199,11 +199,12 @@ int main(int argc, char *argv[])
 					srand(time(NULL) ^ (getpid()<<16));
 					if(imagePid == 0) 
 					{
-						sendImageFromStream(stream, connfd, encKey, maxDelay, i);
+						sendImageFromStream(stream, connfd, encKey, maxDelay, i);						
 						exit(0);
 					} 
 					else 
 					{
+						++i;
 						sleep(timeout);
 					}
 				}
